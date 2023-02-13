@@ -1,41 +1,32 @@
 # kube-haproxy
 
-[中文](READMECN.md)
+kube-haproxy 是使用haproxy替换kubernetes集群中kube-proxy IPVS/IPTables功能的
 
-kube-haproxy is a kube-proxy replacement solition on Kubernetes.
+# 工作模式
 
-It features:
+kube-haproxy 可以工作为三种模式：
 
-- High Availability HAProxy only on kubernetes in-cluster, support function failover. 
-- Auto configure kubernetes service resouce
-- Developed in Golang, has no additional dependency (only haproxy).
+- **Local**: 于kube-proxy相似, 但是在部署时需要以 in-cluster 方式部署在kubentes集群中，haproxy将以sidecar模式工作在每个node节点上，而所有经由service的流量都通过127.0.0.1转发
+- **only fetch**: kube-haproxy 是为外部LB提供的一个controller，这将允许用户将外部流量引入到集群内，而不使用原生的service功能，但 apiserver service仍然使用原生service(iptables/ipvs)
+- **replacement kube-proxy**: kube-haproxy可以部署在集群内/外，作为控制平面提供service服务，所有service流量（包含apiserver service）都经由 外/内 补haproxy
 
-# Theory
+> Notes: kube-haproxy的所有模式都不支持ingress于NodePort功能了，因为这以及替代了这两个功能
 
-kube-haproxy using haproxy replace IPVS/iptables mod on kubernetes service
-
-# work mode 
-
-- **Local**: similar kube-proxy, each node will deployment haproxy with node sidecar way. all traffic via haproxy 127.0.0.1 forward to Pod.
-- **only fetch**: kube-haproxy is a only external ingress on kubernetes, if using service function on kubernetes, service traffic use naive kubernetes service, kube-haproxy service only provide a bypass internal service function.
-- **replacement kube-proxy**: all traffic via haproxy contain internal,external service.
-
-> Notes: ingress and NodePort function not available in all modes.
-
-# Build
+# 如何部署
 
 ```bash
 ./hack/mod.sh {your kubernetes version}
 go build server/haproxy.go
 ```
 
-# run
+# 如何运行
 
-- local need running in kubernetes cluster-in mode
-- only fetch at will.
-- replacement kube-proxy need change kube-apiserver service controller.
+- local模式只能工作与集群内
+- only fetch 只作为外部ingress使用
+- replacement kube-proxy：这种模式下需要自行修改kube-apiserver的service controller cidr方式
 
-# argument
+# kube-haproxy参数
+
 - --interface string                 can specify special network interface name (only local mode).
 - --kube-api-burst int32             Burst to use while talking with kubernetes apiserver
 - --kube-api-content-type string     Content type of requests sent to apiserver.
