@@ -1,0 +1,9 @@
+# Ignore all
+.run
+.idea
+cmd
+go.mod
+go.sum
+
+
+ 
