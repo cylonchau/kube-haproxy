@@ -4,6 +4,7 @@
 cmd
 go.mod
 go.sum
+_output
 
 
  

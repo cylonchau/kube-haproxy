@@ -18,14 +18,16 @@ kube-haproxy using haproxy replace IPVS/iptables mod on kubernetes service
 
 - **Local**: similar kube-proxy, each node will deployment haproxy with node sidecar way. all traffic via haproxy 127.0.0.1 forward to Pod.
 - **only fetch**: kube-haproxy is a only external ingress on kubernetes, if using service function on kubernetes, service traffic use naive kubernetes service, kube-haproxy service only provide a bypass internal service function.
-- **replacement kube-proxy**: all traffic via haproxy contain internal,external service.
+- **replacement kube-proxy**: all traffic via haproxy to Pod, contain internal/external service.
 
 > Notes: ingress and NodePort function not available in all modes.
 
 # Build
 
 ```bash
-./hack/mod.sh {your kubernetes version}
+./hack/mod.sh {your kubernetes version without v }
+# ./hack/mod.sh 1.19.10 correct
+# ./hack/mod.sh v1.19.10 mistake
 go build server/haproxy.go
 ```
 

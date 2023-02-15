@@ -15,7 +15,8 @@ kube-haproxy 可以工作为三种模式：
 # 如何部署
 
 ```bash
-./hack/mod.sh {your kubernetes version}
+./hack/mod.sh {your kubernetes version without v }
+# ./hack/mod.sh 1.19.10
 go build server/haproxy.go
 ```
 

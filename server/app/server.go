@@ -26,14 +26,13 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"k8s.io/component-base/version/verflag"
 
 	gerrors "github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
@@ -45,11 +44,9 @@ import (
 	cliflag "k8s.io/component-base/cli/flag"
 	componentbaseconfig "k8s.io/component-base/config"
 	"k8s.io/component-base/version"
-	"k8s.io/component-base/version/verflag"
 	"k8s.io/klog/v2"
 	"k8s.io/kube-proxy/config/v1alpha1"
 	api "k8s.io/kubernetes/pkg/apis/core"
-	"k8s.io/kubernetes/pkg/proxy/apis"
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
 	proxyconfigscheme "k8s.io/kubernetes/pkg/proxy/apis/config/scheme"
 	kubeproxyconfigv1alpha1 "k8s.io/kubernetes/pkg/proxy/apis/config/v1alpha1"
@@ -64,9 +61,9 @@ import (
 )
 
 const (
-	proxyModeOF    = "of"
-	proxyModeLocal = "sk"
-	proxyModeRK    = "rk"
+	proxyModeOF      = "of"
+	proxyModeLocal   = "local"
+	proxyModeMeshAll = "mesh"
 )
 
 // proxyRun defines the interface to run a specified ProxyServer
@@ -83,10 +80,7 @@ type Options struct {
 	// proxyServer is the interface to run the proxy server
 	proxyServer proxyRun
 	// errCh is the channel that errors will be sent
-	errCh chan error
-	// backend address is haproxy address
-	mode                      string
-	master                    string
+	errCh                     chan error
 	syncPeriod, minSyncPeriod time.Duration
 	configSyncPeriod          metav1.Duration
 	haproxyInfo               haproxy.InitInfo
@@ -97,7 +91,6 @@ func (o *Options) addOSFlags(fs *pflag.FlagSet) {}
 // AddFlags adds flags to fs and binds them to options.
 func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	o.addOSFlags(fs)
-	fs.StringVar(&o.mode, "proxy-mode", o.mode, "Which proxy mode to use: 'onlyfetch' or 'local' (similar kube-proxy) or without proxy. If blank, default only fetch.")
 	fs.DurationVar(&o.syncPeriod, "sync-period", o.syncPeriod, "The maximum interval of how often haproxy rules are refreshed (e.g. '5s', '1m', '2h22m').  Must be greater than 0.")
 	fs.DurationVar(&o.minSyncPeriod, "min-sync-period", o.minSyncPeriod, "The minimum interval of how often the haproxy rules can be refreshed as endpoints and services change (e.g. '5s', '1m', '2h22m').")
 	fs.BoolVar(&o.cleanupAndExit, "cleanup", o.cleanupAndExit, "If true cleanup haproxy frontends/backends/servers/binds rules and exit.")
@@ -108,10 +101,11 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.Float32Var(&o.config.QPS, "kube-api-qps", o.config.QPS, "QPS to use while talking with kubernetes apiserver")
 	fs.Int32Var(&o.config.Burst, "kube-api-burst", o.config.Burst, "Burst to use while talking with kubernetes apiserver")
 
+	fs.StringVar(&o.haproxyInfo.Mode, "proxy-mode", o.haproxyInfo.Mode, "Which proxy mode to use: 'onlyfetch' or 'local' (similar kube-proxy) or without proxy. If blank, default only fetch.")
 	fs.StringVar(&o.haproxyInfo.Dev, "interface", o.haproxyInfo.Dev, "can specify special network interface name (only local mode).")
 	fs.StringVar(&o.haproxyInfo.User, "user", o.haproxyInfo.User, "control access to frontend/backend/listen sections or to http stats by allowing only authenticated and authorized user.")
 	fs.StringVar(&o.haproxyInfo.Passwd, "passwd", o.haproxyInfo.Passwd, "specify current user's password. Both secure (encrypted) and insecure (unencrypted) passwords can be used.")
-	fs.StringVar(&o.haproxyInfo.Address, "backend-addr", o.haproxyInfo.Address, "specify haproxy address.")
+	fs.StringVar(&o.haproxyInfo.Host, "dataplaneapi", o.haproxyInfo.Host, "specify dataplaneapi address.")
 
 }
 
@@ -133,6 +127,7 @@ func (o *Options) errorHandler(err error) {
 
 // Run runs the specified ProxyServer.
 func (o *Options) Run() error {
+	fmt.Println(111111)
 	defer close(o.errCh)
 
 	proxyServer, err := NewProxyServer(o)
@@ -366,24 +361,8 @@ func (s *ProxyServer) Run() error {
 		errCh = make(chan error)
 	}
 
-	noProxyName, err := labels.NewRequirement(apis.LabelServiceProxyName, selection.DoesNotExist, nil)
-	if err != nil {
-		return err
-	}
-
-	noHeadlessEndpoints, err := labels.NewRequirement(v1.IsHeadlessService, selection.DoesNotExist, nil)
-	if err != nil {
-		return err
-	}
-
-	labelSelector := labels.NewSelector()
-	labelSelector = labelSelector.Add(*noProxyName, *noHeadlessEndpoints)
-
 	// Make informers that filter out objects that want a non-default service proxy.
-	informerFactory := informers.NewSharedInformerFactoryWithOptions(s.Client, s.ConfigSyncPeriod,
-		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
-			options.LabelSelector = labelSelector.String()
-		}))
+	informerFactory := informers.NewSharedInformerFactoryWithOptions(s.Client, s.ConfigSyncPeriod)
 
 	// Create configs (i.e. Watches for Services and Endpoints or EndpointSlices)
 	// Note: RegisterHandler() calls need to happen before creation of Sources because sources

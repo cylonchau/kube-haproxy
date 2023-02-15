@@ -25,9 +25,9 @@ type HaproxyInterface interface {
 
 	getVersion() int
 
-	GetServer(backendName, srvName string) *models.Server
+	GetServer(backendName, srvName string) models.Server
 
-	GetServers(backendName string) *models.Servers
+	GetServers(backendName string) models.Servers
 
 	AddFrontend(payload *models.Frontend) error
 	AddBind(payload *models.Bind) error

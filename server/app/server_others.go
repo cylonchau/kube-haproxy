@@ -88,19 +88,20 @@ func newProxyServer(opt *Options) (*ProxyServer, error) {
 
 	var proxier kube_haproxy.Provider
 
-	proxyMode := getProxyMode(opt.mode)
+	proxyMode := getProxyMode(opt.haproxyInfo.Mode)
 
 	switch proxyMode {
 	case proxyModeOF:
-		proxier, err = haproxy.NewProxier(opt.syncPeriod,
+		proxier, err = haproxy.NewProxier(
+			opt.syncPeriod,
 			opt.minSyncPeriod,
 			hostname,
 			"",
 			recorder,
-			opt.haproxyInfo,
+			&opt.haproxyInfo,
 		)
 	case proxyModeLocal:
-	case proxyModeRK:
+	case proxyModeMeshAll:
 	}
 
 	return &ProxyServer{
@@ -290,8 +291,8 @@ func getProxyMode(proxyMode string) string {
 		return proxyModeLocal
 	case proxyModeOF:
 		return proxyModeOF
-	case proxyModeRK:
-		return proxyModeRK
+	case proxyModeMeshAll:
+		return proxyModeMeshAll
 	}
 	klog.Warningf("Unknown proxy mode %q, assuming haproxy only fetchy mode", proxyMode)
 	return proxyModeOF

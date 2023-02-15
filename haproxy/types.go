@@ -19,3 +19,16 @@ type ObjSet struct {
 	Frontends *goset.Set[*models.Frontend]
 	Binds     *goset.Set[*models.Bind]
 }
+
+type ModeType string
+
+const (
+	Local     = "local"
+	OnlyFetch = "of"
+	MeshAll   = "mesh"
+)
+
+type InitInfo struct {
+	Host                    string
+	User, Passwd, Dev, Mode string
+}
