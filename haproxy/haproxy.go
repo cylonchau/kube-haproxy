@@ -21,12 +21,6 @@ import (
 
 var _ HaproxyInterface = &HaproxyHandle{}
 
-type HaproxyInfo struct {
-	Backend  models.Backend
-	Bind     models.Bind
-	Frontend models.Frontend
-}
-
 type HaproxyHandle struct {
 	localAddr string
 	request   *restclient.Request
@@ -94,6 +88,8 @@ func (h *HaproxyHandle) ensureOneBind(bindName, frontendName string) (exist bool
 
 // backend series
 func (h *HaproxyHandle) AddBackend(payload *models.Backend) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	v := h.getVersion()
 	url := fmt.Sprintf("%s?version=%d", BACKEND, v)
 	body, err := json.Marshal(payload)
@@ -106,29 +102,63 @@ func (h *HaproxyHandle) AddBackend(payload *models.Backend) error {
 	return err
 }
 
-func (h *HaproxyHandle) GetOneBackend(backendName string) (HaproxyInfo, error) {
+func (h *HaproxyHandle) GetOneBackend(backendName string) HaproxyInfo {
 	url := fmt.Sprintf("%s/%s", BACKEND, url.QueryEscape(backendName))
 	resp := h.request.Path(url).Get().Do(context.TODO())
 	if resp.Err != nil {
-		return HaproxyInfo{}, resp.Err
+		return HaproxyInfo{}
 	}
 	var backendobj map[string]models.Backend
-	json.Unmarshal(resp.Body, backendobj)
+	json.Unmarshal(resp.Body, &backendobj)
 	backend := backendobj["data"]
 	if reflect.ValueOf(backend) == reflect.ValueOf(models.Backend{}) {
-		return HaproxyInfo{}, nil
+		return HaproxyInfo{}
 	}
 	return HaproxyInfo{
 		Backend: backend,
-	}, nil
+	}
 }
 
-func (h *HaproxyHandle) deleteBackend(backendName string) (bool, error) {
+func (h *HaproxyHandle) GetAllService() Services {
+	var srvs Services
+	url := fmt.Sprintf("%s", BACKEND)
+	resp := h.request.Path(url).Get().Do(context.TODO())
+	if resp.Err != nil {
+		return Services{}
+	}
+
+	var backendobj map[string][]models.Backend
+	json.Unmarshal(resp.Body, &backendobj)
+	backend := backendobj["data"]
+	if reflect.ValueOf(backend) == reflect.ValueOf([]models.Backend{}) {
+		return Services{}
+	}
+	srvs.Backend = backend
+
+	url = fmt.Sprintf("%s", FRONTEND)
+	resp = h.request.Path(url).Get().Do(context.TODO())
+	if resp.Err != nil {
+		return Services{}
+	}
+
+	var frontendobj map[string][]models.Frontend
+	json.Unmarshal(resp.Body, &frontendobj)
+	frontend := frontendobj["data"]
+
+	if reflect.ValueOf(backend) == reflect.ValueOf([]models.Backend{}) {
+		return Services{}
+	}
+	srvs.Frontend = frontend
+	return srvs
+}
+
+func (h *HaproxyHandle) DeleteBackend(backendName string) bool {
+	klog.V(3).Infof("Opeate delete backend [%s]", backendName)
 	v := h.getVersion()
 	url := fmt.Sprintf("%s/%s?version=%d", BACKEND, url.QueryEscape(backendName), v)
 	resp := h.request.URL(url).Delete().Do(context.TODO())
-
-	return handleError(&resp, backendName)
+	b, _ := handleError(&resp, backendName)
+	return b
 }
 
 func (h *HaproxyHandle) ReplaceBackend(old, new *models.Backend) (bool, error) {
@@ -145,12 +175,16 @@ func (h *HaproxyHandle) ReplaceBackend(old, new *models.Backend) (bool, error) {
 }
 
 // frontend series
-func (h *HaproxyHandle) deleteFrontend(frontendName string) (bool, error) {
+func (h *HaproxyHandle) DeleteFrontend(frontendName string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	v := h.getVersion()
 	url := fmt.Sprintf("%s/%s?version=%d", FRONTEND, url.QueryEscape(frontendName), v)
+	fmt.Println(url)
 	resp := h.request.Path(url).Delete().Do(context.TODO())
-	klog.V(4).Infof("Opeate delete frontend [%s]", frontendName)
-	return handleError(&resp, frontendName)
+	klog.V(3).Infof("Opeate delete frontend [%s]", frontendName)
+	b, _ := handleError(&resp, frontendName)
+	return b
 }
 
 func (h *HaproxyHandle) AddFrontend(payload *models.Frontend) error {
@@ -158,7 +192,6 @@ func (h *HaproxyHandle) AddFrontend(payload *models.Frontend) error {
 	defer h.mu.Unlock()
 	v := h.getVersion()
 	url := fmt.Sprintf("%s?version=%d", FRONTEND, v)
-	fmt.Println(url)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		klog.Errorf("Failed to json convert marshal: %s\n", err)
@@ -214,7 +247,7 @@ func (h *HaproxyHandle) AddServerToBackend(payload *models.Server, backendName s
 	return err
 }
 
-func (h *HaproxyHandle) deleteServerFromBackend(serverName, backendName string) (bool, error) {
+func (h *HaproxyHandle) DeleteServerFromBackend(serverName, backendName string) (bool, error) {
 	v := h.getVersion()
 	url := fmt.Sprintf("%s/%s?parent_type=backend&parent_name=%s&version=%d", SERVER, url.QueryEscape(serverName), url.QueryEscape(backendName), v)
 	resp := h.request.Path(url).Delete().Do(context.TODO())
@@ -242,13 +275,13 @@ func (h *HaproxyHandle) GetServers(backendName string) models.Servers {
 		klog.Errorf("Failed to request: %s\n", resp.Err)
 		return models.Servers{}
 	}
-	var servers models.Servers
+	var servers map[string]models.Servers
 	err := json.Unmarshal(resp.Body, &servers)
 	if err != nil {
 		klog.Errorf("Failed to json convert models.Server: %s\n", err)
 		return models.Servers{}
 	}
-	return servers
+	return servers["data"]
 }
 
 func (h *HaproxyHandle) GetServer(backendName, srvName string) models.Server {
@@ -284,7 +317,7 @@ func (h *HaproxyHandle) GetOneBind(bindName, frontName string) HaproxyInfo {
 		return HaproxyInfo{}
 	}
 	var bobj map[string]models.Bind
-	json.Unmarshal(resp.Body, bobj)
+	json.Unmarshal(resp.Body, &bobj)
 	bind := bobj["data"]
 	if reflect.ValueOf(bind) == reflect.ValueOf(models.Bind{}) {
 		return HaproxyInfo{}
@@ -294,9 +327,9 @@ func (h *HaproxyHandle) GetOneBind(bindName, frontName string) HaproxyInfo {
 	}
 }
 
-func (h *HaproxyHandle) AddBind(payload *models.Bind) error {
+func (h *HaproxyHandle) AddBind(payload *models.Bind, frontendName string) error {
 	v := h.getVersion()
-	url := fmt.Sprintf("%s?parent_type=frontend&frontend=%s&version=%d", BIND, payload.Name, v)
+	url := fmt.Sprintf("%s?parent_type=frontend&frontend=%s&version=%d", BIND, url.QueryEscape(frontendName), v)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		klog.Errorf("Failed to json convert marshal: %s\n", err)
@@ -308,7 +341,7 @@ func (h *HaproxyHandle) AddBind(payload *models.Bind) error {
 	return err
 }
 
-func (h *HaproxyHandle) deleteBind(bindName, frontendName string) (bool, error) {
+func (h *HaproxyHandle) DeleteBind(bindName, frontendName string) (bool, error) {
 	v := h.getVersion()
 	url := fmt.Sprintf("%s/%s?parent_type=frontend&frontend=%s&version=%d", BIND, url.QueryEscape(bindName), url.QueryEscape(frontendName), v)
 	resp := h.request.Path(url).Delete().Do(context.TODO())
@@ -387,22 +420,22 @@ func (h *HaproxyHandle) checkPortIsAvailable(protocol string, port int) (status 
 
 func (h *HaproxyInfo) Equal(obj interface{}) bool {
 	switch obj.(type) {
-	case *models.Backend:
-		backend := obj.(*models.Backend)
+	case models.Backend:
+		backend := obj.(models.Backend)
 		return h.Backend.Name == backend.Name &&
 			h.Backend.Mode == backend.Mode &&
 			h.Backend.Balance.Algorithm == backend.Balance.Algorithm &&
 			h.Backend.Httpchk == backend.Httpchk &&
 			h.Backend.Forwardfor.Enabled == backend.Forwardfor.Enabled
-	case *models.Frontend:
-		frontend := obj.(*models.Frontend)
+	case models.Frontend:
+		frontend := obj.(models.Frontend)
 		return h.Frontend.Name == frontend.Name &&
 			h.Frontend.Mode == frontend.Mode &&
 			h.Frontend.Forwardfor == frontend.Forwardfor &&
 			h.Frontend.DefaultBackend == frontend.DefaultBackend &&
 			h.Frontend.Maxconn == frontend.Maxconn
-	case *models.Bind:
-		bind := obj.(*models.Bind)
+	case models.Bind:
+		bind := obj.(models.Bind)
 		return h.Bind.Name == bind.Name &&
 			h.Bind.Address == bind.Address &&
 			h.Bind.Port == bind.Port
@@ -461,18 +494,19 @@ func (h *HaproxyInfo) Equal(obj interface{}) bool {
 //}
 
 func (h *HaproxyHandle) getVersion() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	//h.mu.Lock()
+	//defer h.mu.Unlock()
 	resp := h.request.Path(VERSION).Get().Do(context.TODO())
 	if resp.Err != nil {
 		return -1
 	}
-	version, _ := strconv.Atoi(string(resp.Body))
+	version, _ := strconv.Atoi(strings.TrimSpace(string(resp.Body)))
 	return version
 }
 
 func NewHaproxyHandle(h *InitInfo) HaproxyHandle {
 	req := restclient.NewDefaultRequest().BasicAuth(h.User, h.Passwd).Host(h.Host)
+	req.AddHeader("Content-Type", "application/json")
 	var addr string
 	addr = h.Host
 	if addr == "" {
@@ -483,12 +517,11 @@ func NewHaproxyHandle(h *InitInfo) HaproxyHandle {
 	if mode == "" {
 		mode = OnlyFetch
 	}
-	a := HaproxyHandle{
+	return HaproxyHandle{
 		localAddr: addr,
 		request:   req,
 		mode:      mode,
 	}
-	return a
 }
 
 // useful links

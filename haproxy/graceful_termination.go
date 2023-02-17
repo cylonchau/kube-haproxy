@@ -150,7 +150,7 @@ func (m *GracefulTerminationManager) deleteSrvFunc(srvToDelete *srvItem) (bool, 
 	}
 
 	klog.V(5).Infof("Deleting server in backend: %s", srvToDelete.srv.Address, srvToDelete.backendName)
-	bool, err := m.haproxy.deleteServerFromBackend(srvToDelete.srv.Name, srvToDelete.backendName)
+	bool, err := m.haproxy.DeleteServerFromBackend(srvToDelete.srv.Name, srvToDelete.backendName)
 	if err != nil || !bool {
 		return false, fmt.Errorf("Delete destination %s err: %v", srvToDelete.srv.Address, err)
 	}
@@ -173,7 +173,7 @@ func (m *GracefulTerminationManager) MoveRSOutofGracefulDeleteList(srv *models.S
 	if !find {
 		return fmt.Errorf("failed to find server %s in backend: %s", srv.Address, backendName)
 	}
-	_, err := m.haproxy.deleteServerFromBackend(srv.Name, backendName)
+	_, err := m.haproxy.DeleteServerFromBackend(srv.Name, backendName)
 	if err != nil {
 		return err
 	}

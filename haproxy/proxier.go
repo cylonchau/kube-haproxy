@@ -135,6 +135,7 @@ func NewProxier(
 	interfaceName string,
 	recorder record.EventRecorder,
 	haproxyInfo *InitInfo,
+	mode string,
 ) (*Proxier, error) {
 	handler := NewHaproxyHandle(haproxyInfo)
 	proxier := &Proxier{
@@ -147,6 +148,7 @@ func NewProxier(
 		haproxyHandle:         handler,
 		interfaceName:         interfaceName,
 		gracefuldeleteManager: NewGracefulTerminationManager(&handler),
+		mode:                  mode,
 	}
 
 	burstSyncs := 2
@@ -161,49 +163,50 @@ func NewProxier(
 }
 
 func (proxier *Proxier) syncService(info HaproxyInfo) error {
-	frontend := proxier.haproxyHandle.GetOneFrontend(info.Frontend.Name)
-	if !reflect.DeepEqual(frontend.Frontend, models.Frontend{}) || !frontend.Equal(info.Frontend) {
-		klog.V(1).Infof("Adding new frontend %s", info.Frontend.Name)
-		err := proxier.haproxyHandle.AddFrontend(&info.Frontend)
-		if err != nil {
-			return err
-		}
-	} else {
-		klog.V(3).Infof("Frontend service %s was changed", info.Frontend.Name)
-		_, err := proxier.haproxyHandle.ReplaceFrontend(&frontend.Frontend, &info.Frontend)
-		if err != nil {
-			return err
+	backend := proxier.haproxyHandle.GetOneBackend(info.Backend.Name)
+	if backend.Backend.Mode != "udp" {
+		if !reflect.DeepEqual(backend.Backend, models.Backend{}) || !backend.Equal(info.Backend) {
+			klog.V(3).Infof("Adding new backend %s", info.Backend.Name)
+			err := proxier.haproxyHandle.AddBackend(&info.Backend)
+			if err != nil {
+				return err
+			}
+		} else {
+			klog.V(3).Infof("Backend service %s was changed", info.Backend.Name)
+			_, err := proxier.haproxyHandle.ReplaceBackend(&backend.Backend, &info.Backend)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
-	backend, err := proxier.haproxyHandle.GetOneBackend(info.Backend.Name)
-	if err != nil {
-		return err
-	}
-	if !reflect.DeepEqual(backend.Backend, models.Backend{}) || !backend.Equal(info.Backend) {
-		klog.V(3).Infof("Adding new backend %s", info.Frontend.Name)
-		err := proxier.haproxyHandle.AddBackend(&info.Backend)
-		if err != nil {
-			return err
-		}
-	} else {
-		klog.V(3).Infof("Backend service %s was changed", info.Backend.Name)
-		_, err := proxier.haproxyHandle.ReplaceBackend(&backend.Backend, &info.Backend)
-		if err != nil {
-			return err
+	frontend := proxier.haproxyHandle.GetOneFrontend(info.Frontend.Name)
+	if frontend.Frontend.Mode != "udp" {
+		if !reflect.DeepEqual(frontend.Frontend, models.Frontend{}) || !frontend.Equal(info.Frontend) {
+			klog.V(3).Infof("Adding new frontend %s", info.Frontend.Name)
+			err := proxier.haproxyHandle.AddFrontend(&info.Frontend)
+			if err != nil {
+				return err
+			}
+		} else {
+			klog.V(3).Infof("Frontend service %s was changed", info.Frontend.Name)
+			_, err := proxier.haproxyHandle.ReplaceFrontend(&frontend.Frontend, &info.Frontend)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	bind := proxier.haproxyHandle.GetOneBind(info.Bind.Name, info.Frontend.Name)
 	if !reflect.DeepEqual(bind.Bind, models.Bind{}) || !bind.Equal(info.Bind) {
-		klog.V(3).Infof("Bind address %s:%s to frontend %s", bind.Bind.Address, bind.Bind.Port, info.Frontend.Name)
-		err := proxier.haproxyHandle.AddBind(&info.Bind)
+		klog.V(3).Infof("Bind %s:%d to frontend %s", bind.Bind.Address, bind.Bind.Port, info.Frontend.Name)
+		err := proxier.haproxyHandle.AddBind(&info.Bind, info.Frontend.Name)
 		if err != nil {
 			return err
 		}
 	} else {
-		klog.V(3).Infof("Frontend address bind %s:%s was changed", info.Bind.Name, info.Bind.Port)
-		_, err := proxier.haproxyHandle.ReplaceBackend(&backend.Backend, &info.Backend)
+		klog.V(3).Infof("Frontend bind %s:%d was changed", info.Bind.Name, info.Bind.Port)
+		_, err := proxier.haproxyHandle.replaceBind(&bind.Bind, &info.Bind, bind.Frontend.Name)
 		if err != nil {
 			return err
 		}
@@ -301,18 +304,20 @@ func (proxier *Proxier) syncProxyRules() {
 		haproxyIp string
 		err       error
 	)
-	switch proxier.haproxyHandle.mode {
-	case Local:
-		haproxyIp = "127.0.0.1"
-	case OnlyFetch:
-		haproxyIp = proxier.haproxyHandle.localAddr
-	case MeshAll:
-		haproxyIp = proxier.haproxyHandle.localAddr
-	}
+	//switch proxier.haproxyHandle.mode {
+	//case Local:
+	//	haproxyIp = "127.0.0.1"
+	//case OnlyFetch:
+	//	haproxyIp = proxier.haproxyHandle.localAddr
+	//case MeshAll:
+	//	haproxyIp = proxier.haproxyHandle.localAddr
+	//}
 
-	if haproxyIp == "" {
-		haproxyIp, err = GetLocalAddr(proxier.interfaceName)
+	if proxier.interfaceName == "" {
+		proxier.interfaceName = "eth0"
 	}
+	haproxyIp, err = GetLocalAddr(proxier.interfaceName)
+
 	if err != nil {
 		klog.Error(err)
 		return
@@ -347,12 +352,13 @@ func (proxier *Proxier) syncProxyRules() {
 			klog.Errorf("Failed to cast serviceInfo %q", svcName.String())
 			continue
 		}
-
 		//isIPv6 := utilnet.IsIPv6(svcInfo.ClusterIP())
 		protocol := strings.ToLower(string(svcInfo.Protocol()))
 		// Precompute svcNameString; with many services the many calls
 		// to ServicePortName.String() show up in CPU profiles.
 		svcNameString := svcName.String()
+		svcNameString = strings.ReplaceAll(svcNameString, "/", ".")
+		svcNameString = strings.ReplaceAll(svcNameString, ":", ".")
 		port := int64(svcInfo.Port())
 
 		// 这里是作为 kube-proxy 中 service 资源
@@ -434,6 +440,9 @@ func (proxier *Proxier) syncProxyRules() {
 		//}
 		// Capture the clusterIP.
 		// ipset call
+		if proxier.mode == "of" && (strings.Contains(svcNameString, "default.kubernetes") || strings.Contains(svcNameString, "kube-system.kube-dns")) {
+			continue
+		}
 		if err := proxier.syncService(obj); err == nil {
 			// ExternalTrafficPolicy only works for NodePort and external LB traffic, does not affect ClusterIP
 			// So we still need clusterIP rules in onlyNodeLocalEndpoints mode.

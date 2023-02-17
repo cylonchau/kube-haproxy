@@ -96,12 +96,31 @@ func newProxyServer(opt *Options) (*ProxyServer, error) {
 			opt.syncPeriod,
 			opt.minSyncPeriod,
 			hostname,
-			"",
+			opt.haproxyInfo.Dev,
 			recorder,
 			&opt.haproxyInfo,
+			proxyModeOF,
 		)
 	case proxyModeLocal:
+		proxier, err = haproxy.NewProxier(
+			opt.syncPeriod,
+			opt.minSyncPeriod,
+			hostname,
+			opt.haproxyInfo.Dev,
+			recorder,
+			&opt.haproxyInfo,
+			proxyModeLocal,
+		)
 	case proxyModeMeshAll:
+		proxier, err = haproxy.NewProxier(
+			opt.syncPeriod,
+			opt.minSyncPeriod,
+			hostname,
+			opt.haproxyInfo.Dev,
+			recorder,
+			&opt.haproxyInfo,
+			proxyModeMeshAll,
+		)
 	}
 
 	return &ProxyServer{

@@ -32,3 +32,13 @@ type InitInfo struct {
 	Host                    string
 	User, Passwd, Dev, Mode string
 }
+
+type HaproxyInfo struct {
+	Backend  models.Backend
+	Bind     models.Bind
+	Frontend models.Frontend
+}
+type Services struct {
+	Backend  []models.Backend
+	Frontend []models.Frontend
+}

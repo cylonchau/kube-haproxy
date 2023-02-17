@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"reflect"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -51,10 +52,7 @@ import (
 	proxyconfigscheme "k8s.io/kubernetes/pkg/proxy/apis/config/scheme"
 	kubeproxyconfigv1alpha1 "k8s.io/kubernetes/pkg/proxy/apis/config/v1alpha1"
 	"k8s.io/kubernetes/pkg/proxy/config"
-	"k8s.io/kubernetes/pkg/proxy/iptables"
-	"k8s.io/kubernetes/pkg/proxy/userspace"
 	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
-	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 
 	kube_haproxy "github.com/cylonchau/kube-haproxy/api"
 	"github.com/cylonchau/kube-haproxy/haproxy"
@@ -69,7 +67,7 @@ const (
 // proxyRun defines the interface to run a specified ProxyServer
 type proxyRun interface {
 	Run() error
-	CleanupAndExit() error
+	CleanupAndExit(o *haproxy.InitInfo) error
 }
 
 // Options contains everything necessary to create and run a proxy server.
@@ -91,9 +89,9 @@ func (o *Options) addOSFlags(fs *pflag.FlagSet) {}
 // AddFlags adds flags to fs and binds them to options.
 func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	o.addOSFlags(fs)
-	fs.DurationVar(&o.syncPeriod, "sync-period", o.syncPeriod, "The maximum interval of how often haproxy rules are refreshed (e.g. '5s', '1m', '2h22m').  Must be greater than 0.")
-	fs.DurationVar(&o.minSyncPeriod, "min-sync-period", o.minSyncPeriod, "The minimum interval of how often the haproxy rules can be refreshed as endpoints and services change (e.g. '5s', '1m', '2h22m').")
-	fs.BoolVar(&o.cleanupAndExit, "cleanup", o.cleanupAndExit, "If true cleanup haproxy frontends/backends/servers/binds rules and exit.")
+	fs.DurationVar(&o.syncPeriod, "sync-period", time.Duration(30), "The maximum interval of how often haproxy rules are refreshed (e.g. '5s', '1m', '2h22m').  Must be greater than 0.")
+	fs.DurationVar(&o.minSyncPeriod, "min-sync-period", time.Duration(10), "The minimum interval of how often the haproxy rules can be refreshed as endpoints and services change (e.g. '5s', '1m', '2h22m').")
+	fs.BoolVar(&o.cleanupAndExit, "cleanup", false, "If true cleanup haproxy frontends/backends/servers/binds rules and exit.")
 	fs.DurationVar(&o.configSyncPeriod.Duration, "config-sync-period", o.configSyncPeriod.Duration, "How often configuration from the apiserver is refreshed.  Must be greater than 0.")
 
 	fs.StringVar(&o.config.Kubeconfig, "kubeconfig", o.config.Kubeconfig, "Path to kubeconfig file with authorization information (the master location is set by the master flag).")
@@ -101,11 +99,11 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.Float32Var(&o.config.QPS, "kube-api-qps", o.config.QPS, "QPS to use while talking with kubernetes apiserver")
 	fs.Int32Var(&o.config.Burst, "kube-api-burst", o.config.Burst, "Burst to use while talking with kubernetes apiserver")
 
-	fs.StringVar(&o.haproxyInfo.Mode, "proxy-mode", o.haproxyInfo.Mode, "Which proxy mode to use: 'onlyfetch' or 'local' (similar kube-proxy) or without proxy. If blank, default only fetch.")
-	fs.StringVar(&o.haproxyInfo.Dev, "interface", o.haproxyInfo.Dev, "can specify special network interface name (only local mode).")
+	fs.StringVar(&o.haproxyInfo.Mode, "proxy-mode", "of", "Which proxy mode to use: 'onlyfetch' or 'local' (similar kube-proxy) or without proxy. If blank, default only fetch.")
+	fs.StringVar(&o.haproxyInfo.Dev, "interface", "eth0", "can specify special network interface name (only local mode).")
 	fs.StringVar(&o.haproxyInfo.User, "user", o.haproxyInfo.User, "control access to frontend/backend/listen sections or to http stats by allowing only authenticated and authorized user.")
 	fs.StringVar(&o.haproxyInfo.Passwd, "passwd", o.haproxyInfo.Passwd, "specify current user's password. Both secure (encrypted) and insecure (unencrypted) passwords can be used.")
-	fs.StringVar(&o.haproxyInfo.Host, "dataplaneapi", o.haproxyInfo.Host, "specify dataplaneapi address.")
+	fs.StringVar(&o.haproxyInfo.Host, "dataplaneapi", "http://127.0.0.1:5555", "specify dataplaneapi address.")
 
 }
 
@@ -127,7 +125,6 @@ func (o *Options) errorHandler(err error) {
 
 // Run runs the specified ProxyServer.
 func (o *Options) Run() error {
-	fmt.Println(111111)
 	defer close(o.errCh)
 
 	proxyServer, err := NewProxyServer(o)
@@ -136,7 +133,7 @@ func (o *Options) Run() error {
 	}
 
 	if o.cleanupAndExit {
-		return proxyServer.CleanupAndExit()
+		return proxyServer.CleanupAndExit(&o.haproxyInfo)
 	}
 
 	o.proxyServer = proxyServer
@@ -394,15 +391,26 @@ func (s *ProxyServer) birthCry() {
 
 // CleanupAndExit remove iptables rules and ipset/ipvs rules in ipvs proxy mode
 // and exit if success return nil
-func (s *ProxyServer) CleanupAndExit() error {
-	// cleanup IPv6 and IPv4 iptables rules
-	ipts := []utiliptables.Interface{}
-	var encounteredError bool
-	for _, ipt := range ipts {
-		encounteredError = userspace.CleanupLeftovers(ipt) || encounteredError
-		encounteredError = iptables.CleanupLeftovers(ipt) || encounteredError
-		//encounteredError = ipvs.CleanupLeftovers(s.IpvsInterface, ipt, s.IpsetInterface, s.CleanupIPVS) || encounteredError
+func (s *ProxyServer) CleanupAndExit(o *haproxy.InitInfo) error {
+	haproxyHandler := haproxy.NewHaproxyHandle(o)
+	infos := haproxyHandler.GetAllService()
+	if reflect.DeepEqual(infos, haproxy.Services{}) {
+		return errors.New("Get all services error.")
 	}
+
+	var encounteredError bool
+	klog.V(3).Infof("Removing haproxy backend rules.")
+	for _, svc := range infos.Backend {
+		encounteredError = haproxyHandler.DeleteBackend(svc.Name)
+	}
+	klog.V(3).Infof("Removing haproxy frontend rules.")
+	for _, svc := range infos.Frontend {
+		if svc.Name == "stats" {
+			continue
+		}
+		encounteredError = haproxyHandler.DeleteFrontend(svc.Name)
+	}
+
 	if encounteredError {
 		return errors.New("encountered an error while tearing down rules")
 	}

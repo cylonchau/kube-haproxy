@@ -12,23 +12,32 @@ It features:
 
 # Theory
 
-kube-haproxy using haproxy replace IPVS/iptables mod on kubernetes service
+kube-haproxy using haproxy replace IPVS/iptables mod on kubernetes service.
+
+# Notes
+
+The project is a thought, can working in product envrioment, but the proxy backend can use other software substitution, For example, F5 proxy, envoy, nginx etc.
 
 # work mode 
 
 - **Local**: similar kube-proxy, each node will deployment haproxy with node sidecar way. all traffic via haproxy 127.0.0.1 forward to Pod.
-- **only fetch**: kube-haproxy is a only external ingress on kubernetes, if using service function on kubernetes, service traffic use naive kubernetes service, kube-haproxy service only provide a bypass internal service function.
-- **replacement kube-proxy**: all traffic via haproxy to Pod, contain internal/external service.
+- **mesh**: replacement kube-proxy, all traffic via haproxy to Pod, contain internal/external service.
+- **only fetch**: kube-haproxy is a only external ingress on kubernetes, if using service function on kubernetes, service traffic use naive kubernetes service, *kube-haproxy* service only provide a bypass internal service function.
 
-> Notes: ingress and NodePort function not available in all modes.
+> Notes: 
+> - ingress and NodePort function not available in all modes.
+> - if working in of mode, then kubernetes default service and kube-dns service will does not synchronize.
+> - if working in local mode and mesh mode, need change your kube-apiserver's sevice controller.
+> - haproxy unsupport udp procotol, so the local and mesh mode need a other proxy software. e.g. envoy, traefik.
 
 # Build
 
 ```bash
 ./hack/mod.sh {your kubernetes version without v }
 # ./hack/mod.sh 1.19.10 correct
-# ./hack/mod.sh v1.19.10 mistake
-go build server/haproxy.go
+# ./hack/mod.sh v1.19.10 incorrect
+make help
+make build
 ```
 
 # run
