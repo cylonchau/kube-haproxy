@@ -1,0 +1,97 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-haproxy
+  namespace: default
+data:
+  haproxy.cfg: |
+    global
+      master-worker
+      stats socket /var/run/haproxy.sock user haproxy group haproxy mode 660 level admin expose-fd listeners
+    userlist haproxy-dataplaneapi
+      user admin insecure-password 1fc917c7ad66487470e466c0ad40ddd45b9f7730a4b43e1b2542627f0596bbdc
+    frontend stats
+      mode http
+      maxconn 10
+      bind *:8404
+      stats enable
+      stats uri /stats
+      stats refresh 60s
+      stats hide-version
+    program api
+      command /usr/local/bin/dataplaneapi --host 0.0.0.0 --port 5555 --haproxy-bin /usr/local/sbin/haproxy --config-file /usr/local/etc/haproxy/haproxy.cfg --reload-cmd "kill -SIGUSR2 1" --restart-cmd "kill -SIGUSR2 1" --reload-delay 5 --userlist haproxy-dataplaneapi
+      no option start-on-reload
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-haproxy
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: system:kube-haproxy
+  namespace: default
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - service
+      - endpoints
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scheduler
+subjects:
+  - kind: ServiceAccount
+    name: kube-haproxy
+    namespace: default
+roleRef:
+  kind: Role
+  name: system:kube-haproxy
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-haproxy
+  labels:
+    component: kube-haproxy
+spec:
+  selector:
+    matchLabels:
+      component: kube-haproxy
+  template:
+    metadata:
+      labels:
+        component: kube-haproxy
+    spec:
+      hostNetwork: true
+      serviceAccountName: kube-haproxy
+      priorityClassName: system-cluster-critical
+      containers:
+        - name: kube-haproxy
+          image: cylonchau/kube-haproxy:v0.0.1
+          imagePullPolicy: IfNotPresent
+          command:
+            - ./kube-haproxy
+          args:
+            - --v=4
+            - --dataplaneapi=http://127.0.0.1:5555
+            - --user=admin
+            - --passwd=1fc917c7ad66487470e466c0ad40ddd45b9f7730a4b43e1b2542627f0596bbdc
+            - --config-sync-period=180s
+            - --min-sync-period=60s
+            - --sync-period=60s
+          volumeMounts:
+            - name: kube-haproxy
+              mountPath: /usr/local/etc/haproxy/

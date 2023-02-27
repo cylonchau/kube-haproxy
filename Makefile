@@ -7,6 +7,7 @@ GOBUILD_DIR=cmd
 OUT_DIR ?= _output
 BIN_DIR := $(OUT_DIR)/bin
 
+
 build:
 	hack/build.sh $(BINARY_NAME)
 

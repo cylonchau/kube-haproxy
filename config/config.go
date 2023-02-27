@@ -165,6 +165,7 @@ func (c *EndpointsConfig) handleUpdateEndpoints(oldObj, newObj interface{}) {
 		utilruntime.HandleError(fmt.Errorf("unexpected object type: %v", newObj))
 		return
 	}
+	fmt.Println(endpoints.Name, endpoints.GenerateName)
 	for i := range c.eventHandlers {
 		klog.V(4).Infof("Calling handler.OnEndpointsUpdate")
 		c.eventHandlers[i].OnEndpointsUpdate(oldEndpoints, endpoints)
@@ -240,7 +241,7 @@ func (c *EndpointSliceConfig) handleAddEndpointSlice(obj interface{}) {
 		return
 	}
 	for _, h := range c.eventHandlers {
-		klog.V(4).Infof("Calling handler.OnEndpointSliceAdd %+v", endpointSlice)
+		klog.V(4).Infof("Calling handler.OnEndpointSliceAdd %s %+v", endpointSlice.Name, endpointSlice.Endpoints)
 		h.OnEndpointSliceAdd(endpointSlice)
 	}
 }

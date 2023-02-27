@@ -21,8 +21,9 @@ package haproxy
 //
 
 import (
-	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -32,21 +33,19 @@ import (
 	"github.com/amit7itz/goset"
 	"github.com/haproxytech/models"
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1beta1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/util/async"
 	"k8s.io/kubernetes/pkg/util/conntrack"
+	utilnet "k8s.io/utils/net"
 
 	"github.com/cylonchau/kube-haproxy/api"
 	"github.com/cylonchau/kube-haproxy/controller"
-)
-
-var (
-	checkTimeout   = int64(1)
-	forwordEnable  = "enabled"
-	forwordDisable = "disabled"
 )
 
 // internal struct for string service information
@@ -124,6 +123,8 @@ type Proxier struct {
 	//
 	interfaceName string
 	mode          string
+	proxyIP       net.IP
+	isHealthCheck bool
 }
 
 var _ api.Provider = &Proxier{}
@@ -138,10 +139,10 @@ func NewProxier(
 	mode string,
 ) (*Proxier, error) {
 	handler := NewHaproxyHandle(haproxyInfo)
+
 	proxier := &Proxier{
 		endpointsMap:          make(controller.EndpointsMap),
 		serviceMap:            make(controller.ServiceMap),
-		endpointsChanges:      controller.NewEndpointChangeTracker(hostname, newEndpointInfo, recorder, nil),
 		serviceChanges:        controller.NewServiceChangeTracker(newServiceInfo, recorder, nil),
 		setList:               make(map[string]*ObjSet),
 		syncPeriod:            syncPeriod,
@@ -149,7 +150,39 @@ func NewProxier(
 		interfaceName:         interfaceName,
 		gracefuldeleteManager: NewGracefulTerminationManager(&handler),
 		mode:                  mode,
+		isHealthCheck:         haproxyInfo.IsCheckServer,
 	}
+	var (
+		localIP      net.IP
+		err          error
+		allInterface = true
+	)
+	if interfaceName == "" {
+		proxier.interfaceName = defaultInterface
+	} else {
+		localIP, err = GetLocalAddr(proxier.interfaceName)
+		if err != nil {
+			localIP = net.ParseIP("127.0.0.1")
+		}
+	}
+	if allInterface {
+		proxier.proxyIP = net.ParseIP("0.0.0.0")
+	} else {
+		if getProcessByName(processName) {
+			remoteIP := haproxyInfo.Host
+			u, err := url.Parse(remoteIP)
+			if err != nil {
+				proxier.proxyIP = net.ParseIP("")
+			}
+			proxier.proxyIP = net.ParseIP(u.Hostname())
+
+		} else {
+			proxier.proxyIP = localIP
+		}
+	}
+	isIPv6 := utilnet.IsIPv6(proxier.proxyIP)
+	endpointSlicesEnabled := utilfeature.DefaultFeatureGate.Enabled(features.EndpointSliceProxying)
+	proxier.endpointsChanges = controller.NewEndpointChangeTracker(hostname, newEndpointInfo, &isIPv6, recorder, endpointSlicesEnabled, nil)
 
 	burstSyncs := 2
 	klog.V(2).Infof("haproxy rules sync params: minSyncPeriod=%v, syncPeriod=%v, burstSyncs=%d",
@@ -165,50 +198,56 @@ func NewProxier(
 func (proxier *Proxier) syncService(info HaproxyInfo) error {
 	backend := proxier.haproxyHandle.GetOneBackend(info.Backend.Name)
 	if backend.Backend.Mode != "udp" {
-		if !reflect.DeepEqual(backend.Backend, models.Backend{}) || !backend.Equal(info.Backend) {
+		if reflect.DeepEqual(backend.Backend, models.Backend{}) {
 			klog.V(3).Infof("Adding new backend %s", info.Backend.Name)
 			err := proxier.haproxyHandle.AddBackend(&info.Backend)
 			if err != nil {
 				return err
 			}
 		} else {
-			klog.V(3).Infof("Backend service %s was changed", info.Backend.Name)
-			_, err := proxier.haproxyHandle.ReplaceBackend(&backend.Backend, &info.Backend)
-			if err != nil {
-				return err
+			if !reflect.DeepEqual(backend.Backend, info.Backend) {
+				klog.V(3).Infof("Backend service %s was changed", info.Backend.Name)
+				_, err := proxier.haproxyHandle.ReplaceBackend(backend.Backend.Name, &info.Backend)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
 
 	frontend := proxier.haproxyHandle.GetOneFrontend(info.Frontend.Name)
 	if frontend.Frontend.Mode != "udp" {
-		if !reflect.DeepEqual(frontend.Frontend, models.Frontend{}) || !frontend.Equal(info.Frontend) {
+		if reflect.DeepEqual(frontend.Frontend, models.Frontend{}) {
 			klog.V(3).Infof("Adding new frontend %s", info.Frontend.Name)
 			err := proxier.haproxyHandle.AddFrontend(&info.Frontend)
 			if err != nil {
 				return err
 			}
 		} else {
-			klog.V(3).Infof("Frontend service %s was changed", info.Frontend.Name)
-			_, err := proxier.haproxyHandle.ReplaceFrontend(&frontend.Frontend, &info.Frontend)
-			if err != nil {
-				return err
+			if !reflect.DeepEqual(frontend.Frontend, info.Frontend) {
+				klog.V(3).Infof("Frontend service %s was changed", info.Frontend.Name)
+				_, err := proxier.haproxyHandle.ReplaceFrontend(&frontend.Frontend, &info.Frontend)
+				if err != nil {
+					return err
+				}
 			}
 		}
 	}
 
 	bind := proxier.haproxyHandle.GetOneBind(info.Bind.Name, info.Frontend.Name)
-	if !reflect.DeepEqual(bind.Bind, models.Bind{}) || !bind.Equal(info.Bind) {
+	if reflect.DeepEqual(bind.Bind, models.Bind{}) {
 		klog.V(3).Infof("Bind %s:%d to frontend %s", bind.Bind.Address, bind.Bind.Port, info.Frontend.Name)
 		err := proxier.haproxyHandle.AddBind(&info.Bind, info.Frontend.Name)
 		if err != nil {
 			return err
 		}
 	} else {
-		klog.V(3).Infof("Frontend bind %s:%d was changed", info.Bind.Name, info.Bind.Port)
-		_, err := proxier.haproxyHandle.replaceBind(&bind.Bind, &info.Bind, bind.Frontend.Name)
-		if err != nil {
-			return err
+		if !reflect.DeepEqual(info.Bind, bind.Bind) {
+			klog.V(3).Infof("Frontend bind %s:%d was changed", info.Bind.Name, info.Bind.Port)
+			_, err := proxier.haproxyHandle.replaceBind(bind.Bind.Name, bind.Frontend.Name, &info.Bind)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -221,15 +260,17 @@ func (proxier *Proxier) syncEndpoint(svcPortName api.ServicePortName, backendNam
 	newEndpoints := goset.NewSet[*models.Server]()
 
 	curDests := proxier.haproxyHandle.GetServers(backendName)
-	if len(curDests) == 0 {
-		klog.Errorf("Failed to list haproxy destinations, error")
-		return errors.New("Failed to list haproxy destinations, error")
-	}
-	for _, des := range curDests {
-		curEndpoints.Add(des)
+	if len(curDests) != 0 {
+		for _, des := range curDests {
+			curEndpoints.Add(des)
+		}
+		//return errors.New("Failed to list haproxy destinations, error")
+	} else {
+		klog.Errorf("Failed to list haproxy destinations, The server list is null.")
 	}
 
 	endpoints := proxier.endpointsMap[svcPortName]
+	fmt.Println(endpoints)
 	//
 	//// Service Topology will not be enabled in the following cases:
 	//// 1. externalTrafficPolicy=Local (mutually exclusive with service topology).
@@ -245,6 +286,9 @@ func (proxier *Proxier) syncEndpoint(svcPortName api.ServicePortName, backendNam
 			Port:    &port64,
 			Name:    backendName + epInfo.IP(),
 		}
+		if proxier.isHealthCheck {
+			epSrvInfo.Check = "enabled"
+		}
 		newEndpoints.Add(&epSrvInfo)
 	}
 
@@ -254,14 +298,14 @@ func (proxier *Proxier) syncEndpoint(svcPortName api.ServicePortName, backendNam
 			if !proxier.gracefuldeleteManager.InTerminationList(srv, backendName) {
 				return
 			}
-			klog.V(5).Infof("new server %s is in graceful delete list", srv.Address)
+			klog.V(4).Infof("new server %s is in graceful delete list", srv.Address)
 			err := proxier.gracefuldeleteManager.MoveRSOutofGracefulDeleteList(srv, backendName)
 			if err != nil {
 				klog.Errorf("Failed to delete endpoint: %s in gracefulDeleteQueue, error: %v", srv.Address, err)
 				return
 			}
 		}
-
+		klog.V(4).Infof("Add a new server %s to backend %s", srv.Address, backendName)
 		err := proxier.haproxyHandle.AddServerToBackend(srv, backendName)
 		if err != nil {
 			klog.Errorf("Failed to add destination: [%s=>%s], error: %v", backendName, srv.Address, err)
@@ -293,6 +337,11 @@ func (proxier *Proxier) syncProxyRules() {
 		return
 	}
 
+	start := time.Now()
+	defer func() {
+		klog.V(4).Infof("syncProxyRules took %v", time.Since(start))
+	}()
+
 	// We assume that if this was called, we really want to sync them,
 	// even if nothing changed in the meantime. In other words, callers are
 	// responsible for detecting no-op changes and not calling this function.
@@ -300,10 +349,7 @@ func (proxier *Proxier) syncProxyRules() {
 	endpointUpdateResult := proxier.endpointsMap.Update(proxier.endpointsChanges)
 
 	staleServices := serviceUpdateResult.UDPStaleClusterIP
-	var (
-		haproxyIp string
-		err       error
-	)
+
 	//switch proxier.haproxyHandle.mode {
 	//case Local:
 	//	haproxyIp = "127.0.0.1"
@@ -312,16 +358,6 @@ func (proxier *Proxier) syncProxyRules() {
 	//case MeshAll:
 	//	haproxyIp = proxier.haproxyHandle.localAddr
 	//}
-
-	if proxier.interfaceName == "" {
-		proxier.interfaceName = "eth0"
-	}
-	haproxyIp, err = GetLocalAddr(proxier.interfaceName)
-
-	if err != nil {
-		klog.Error(err)
-		return
-	}
 
 	// merge stale services gathered from updateEndpointsMap
 	for _, svcPortName := range endpointUpdateResult.StaleServiceNames {
@@ -399,7 +435,7 @@ func (proxier *Proxier) syncProxyRules() {
 		bindEntry := models.Bind{
 			Name:    "bind_" + svcNameString,
 			Port:    &port,
-			Address: haproxyIp,
+			Address: proxier.proxyIP.String(),
 		}
 		obj := HaproxyInfo{
 			Backend:  backendEntry,
@@ -440,13 +476,16 @@ func (proxier *Proxier) syncProxyRules() {
 		//}
 		// Capture the clusterIP.
 		// ipset call
+
 		if proxier.mode == "of" && (strings.Contains(svcNameString, "default.kubernetes") || strings.Contains(svcNameString, "kube-system.kube-dns")) {
 			continue
 		}
-		if err := proxier.syncService(obj); err == nil {
+		err := proxier.syncService(obj)
+		if err == nil {
+			err := proxier.syncEndpoint(svcName, obj.Backend.Name)
 			// ExternalTrafficPolicy only works for NodePort and external LB traffic, does not affect ClusterIP
 			// So we still need clusterIP rules in onlyNodeLocalEndpoints mode.
-			if err := proxier.syncEndpoint(svcName, obj.Backend.Name); err != nil {
+			if err != nil {
 				klog.Errorf("Failed to sync endpoint for service: %v, err: %v", obj.Backend.Name, err)
 			}
 		} else {
@@ -536,6 +575,42 @@ func (proxier *Proxier) OnEndpointsDelete(endpoints *v1.Endpoints) {
 func (proxier *Proxier) OnEndpointsSynced() {
 	proxier.mu.Lock()
 	proxier.endpointsSynced = true
+	proxier.setInitialized(proxier.servicesSynced)
+	proxier.mu.Unlock()
+
+	// Sync unconditionally - this is called once per lifetime.
+	proxier.syncProxyRules()
+}
+
+// OnEndpointSliceAdd is called whenever creation of a new endpoint slice object
+// is observed.
+func (proxier *Proxier) OnEndpointSliceAdd(endpointSlice *discovery.EndpointSlice) {
+	if proxier.endpointsChanges.EndpointSliceUpdate(endpointSlice, false) && proxier.isInitialized() {
+		proxier.Sync()
+	}
+}
+
+// OnEndpointSliceUpdate is called whenever modification of an existing endpoint
+// slice object is observed.
+func (proxier *Proxier) OnEndpointSliceUpdate(_, endpointSlice *discovery.EndpointSlice) {
+	if proxier.endpointsChanges.EndpointSliceUpdate(endpointSlice, false) && proxier.isInitialized() {
+		proxier.Sync()
+	}
+}
+
+// OnEndpointSliceDelete is called whenever deletion of an existing endpoint slice
+// object is observed.
+func (proxier *Proxier) OnEndpointSliceDelete(endpointSlice *discovery.EndpointSlice) {
+	if proxier.endpointsChanges.EndpointSliceUpdate(endpointSlice, true) && proxier.isInitialized() {
+		proxier.Sync()
+	}
+}
+
+// OnEndpointSlicesSynced is called once all the initial event handlers were
+// called and the state is fully propagated to local cache.
+func (proxier *Proxier) OnEndpointSlicesSynced() {
+	proxier.mu.Lock()
+	proxier.endpointSlicesSynced = true
 	proxier.setInitialized(proxier.servicesSynced)
 	proxier.mu.Unlock()
 

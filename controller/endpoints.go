@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/kubernetes/pkg/proxy/metrics"
 	utilproxy "k8s.io/kubernetes/pkg/proxy/util"
 	utilnet "k8s.io/utils/net"
 
@@ -122,14 +121,18 @@ type EndpointChangeTracker struct {
 }
 
 // NewEndpointChangeTracker initializes an EndpointsChangeMap
-func NewEndpointChangeTracker(hostname string, makeEndpointInfo makeEndpointFunc, recorder record.EventRecorder, processEndpointsMapChange processEndpointsMapChangeFunc) *EndpointChangeTracker {
+func NewEndpointChangeTracker(hostname string, makeEndpointInfo makeEndpointFunc, isIPv6Mode *bool, recorder record.EventRecorder, endpointSlicesEnabled bool, processEndpointsMapChange processEndpointsMapChangeFunc) *EndpointChangeTracker {
 	ect := &EndpointChangeTracker{
 		hostname:                  hostname,
 		items:                     make(map[types.NamespacedName]*endpointsChange),
 		makeEndpointInfo:          makeEndpointInfo,
+		isIPv6Mode:                isIPv6Mode,
 		recorder:                  recorder,
 		lastChangeTriggerTimes:    make(map[types.NamespacedName][]time.Time),
 		processEndpointsMapChange: processEndpointsMapChange,
+	}
+	if endpointSlicesEnabled {
+		ect.endpointSliceCache = NewEndpointSliceCache(hostname, isIPv6Mode, recorder, makeEndpointInfo)
 	}
 	return ect
 }
@@ -151,7 +154,6 @@ func (ect *EndpointChangeTracker) Update(previous, current *v1.Endpoints) bool {
 	if endpoints == nil {
 		return false
 	}
-	metrics.EndpointChangesTotal.Inc()
 	namespacedName := types.NamespacedName{Namespace: endpoints.Namespace, Name: endpoints.Name}
 
 	ect.lock.Lock()
@@ -188,7 +190,6 @@ func (ect *EndpointChangeTracker) Update(previous, current *v1.Endpoints) bool {
 		}
 	}
 
-	metrics.EndpointChangesPending.Set(float64(len(ect.items)))
 	return len(ect.items) > 0
 }
 
@@ -213,15 +214,12 @@ func (ect *EndpointChangeTracker) EndpointSliceUpdate(endpointSlice *discovery.E
 		return false
 	}
 
-	metrics.EndpointChangesTotal.Inc()
-
 	ect.lock.Lock()
 	defer ect.lock.Unlock()
 
 	changeNeeded := ect.endpointSliceCache.updatePending(endpointSlice, removeSlice)
 
 	if changeNeeded {
-		metrics.EndpointChangesPending.Inc()
 		// In case of Endpoints deletion, the LastChangeTriggerTime annotation is
 		// by-definition coming from the time of last update, which is not what
 		// we want to measure. So we simply ignore it in this cases.
@@ -241,8 +239,6 @@ func (ect *EndpointChangeTracker) EndpointSliceUpdate(endpointSlice *discovery.E
 func (ect *EndpointChangeTracker) checkoutChanges() []*endpointsChange {
 	ect.lock.Lock()
 	defer ect.lock.Unlock()
-
-	metrics.EndpointChangesPending.Set(0)
 
 	if ect.endpointSliceCache != nil {
 		return ect.endpointSliceCache.checkoutChanges()

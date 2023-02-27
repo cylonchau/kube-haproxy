@@ -30,6 +30,7 @@ import (
 type Provider interface {
 	config.EndpointsHandler
 	config.ServiceHandler
+	config.EndpointSliceHandler
 	// Sync immediately synchronizes the Provider's current state to proxy rules.
 	Sync()
 	// SyncLoop runs periodic work.

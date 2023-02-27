@@ -25,25 +25,23 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/tools/cache"
-
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	toolswatch "k8s.io/client-go/tools/watch"
+	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/features"
 	proxyconfigapi "k8s.io/kubernetes/pkg/proxy/apis/config"
 	proxyconfigscheme "k8s.io/kubernetes/pkg/proxy/apis/config/scheme"
-	proxyutiliptables "k8s.io/kubernetes/pkg/proxy/util/iptables"
-	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 	utilnode "k8s.io/kubernetes/pkg/util/node"
 	utilsnet "k8s.io/utils/net"
-
-	"k8s.io/klog/v2"
 
 	kube_haproxy "github.com/cylonchau/kube-haproxy/api"
 	"github.com/cylonchau/kube-haproxy/haproxy"
@@ -124,14 +122,15 @@ func newProxyServer(opt *Options) (*ProxyServer, error) {
 	}
 
 	return &ProxyServer{
-		Client:           client,
-		EventClient:      eventClient,
-		Proxier:          proxier,
-		Broadcaster:      eventBroadcaster,
-		Recorder:         recorder,
-		ProxyMode:        proxyMode,
-		NodeRef:          nodeRef,
-		ConfigSyncPeriod: opt.configSyncPeriod.Duration,
+		Client:            client,
+		EventClient:       eventClient,
+		Proxier:           proxier,
+		Broadcaster:       eventBroadcaster,
+		Recorder:          recorder,
+		ProxyMode:         proxyMode,
+		NodeRef:           nodeRef,
+		ConfigSyncPeriod:  opt.configSyncPeriod.Duration,
+		UseEndpointSlices: utilfeature.DefaultFeatureGate.Enabled(features.EndpointSliceProxying),
 	}, nil
 }
 
@@ -184,84 +183,6 @@ func detectNodeIP(client clientset.Interface, hostname, bindAddress string) net.
 		nodeIP = net.ParseIP("127.0.0.1")
 	}
 	return nodeIP
-}
-
-func getLocalDetector(mode proxyconfigapi.LocalMode, config *proxyconfigapi.KubeProxyConfiguration, ipt utiliptables.Interface, nodeInfo *v1.Node) (proxyutiliptables.LocalTrafficDetector, error) {
-	switch mode {
-	case proxyconfigapi.LocalModeClusterCIDR:
-		if len(strings.TrimSpace(config.ClusterCIDR)) == 0 {
-			klog.Warning("detect-local-mode set to ClusterCIDR, but no cluster CIDR defined")
-			break
-		}
-		return proxyutiliptables.NewDetectLocalByCIDR(config.ClusterCIDR, ipt)
-	case proxyconfigapi.LocalModeNodeCIDR:
-		if len(strings.TrimSpace(nodeInfo.Spec.PodCIDR)) == 0 {
-			klog.Warning("detect-local-mode set to NodeCIDR, but no PodCIDR defined at node")
-			break
-		}
-		return proxyutiliptables.NewDetectLocalByCIDR(nodeInfo.Spec.PodCIDR, ipt)
-	}
-	klog.V(0).Info("detect-local-mode: ", string(mode), " , defaulting to no-op detect-local")
-	return proxyutiliptables.NewNoOpLocalDetector(), nil
-}
-
-func getDualStackLocalDetectorTuple(mode proxyconfigapi.LocalMode, config *proxyconfigapi.KubeProxyConfiguration, ipt [2]utiliptables.Interface, nodeInfo *v1.Node) ([2]proxyutiliptables.LocalTrafficDetector, error) {
-	var err error
-	localDetectors := [2]proxyutiliptables.LocalTrafficDetector{proxyutiliptables.NewNoOpLocalDetector(), proxyutiliptables.NewNoOpLocalDetector()}
-	switch mode {
-	case proxyconfigapi.LocalModeClusterCIDR:
-		if len(strings.TrimSpace(config.ClusterCIDR)) == 0 {
-			klog.Warning("detect-local-mode set to ClusterCIDR, but no cluster CIDR defined")
-			break
-		}
-
-		clusterCIDRs := cidrTuple(config.ClusterCIDR)
-
-		if len(strings.TrimSpace(clusterCIDRs[0])) == 0 {
-			klog.Warning("detect-local-mode set to ClusterCIDR, but no IPv4 cluster CIDR defined, defaulting to no-op detect-local for IPv4")
-		} else {
-			localDetectors[0], err = proxyutiliptables.NewDetectLocalByCIDR(clusterCIDRs[0], ipt[0])
-			if err != nil { // don't loose the original error
-				return localDetectors, err
-			}
-		}
-
-		if len(strings.TrimSpace(clusterCIDRs[1])) == 0 {
-			klog.Warning("detect-local-mode set to ClusterCIDR, but no IPv6 cluster CIDR defined, , defaulting to no-op detect-local for IPv6")
-		} else {
-			localDetectors[1], err = proxyutiliptables.NewDetectLocalByCIDR(clusterCIDRs[1], ipt[1])
-		}
-		return localDetectors, err
-	case proxyconfigapi.LocalModeNodeCIDR:
-		if nodeInfo == nil || len(strings.TrimSpace(nodeInfo.Spec.PodCIDR)) == 0 {
-			klog.Warning("No node info available to configure detect-local-mode NodeCIDR")
-			break
-		}
-		// localDetectors, like ipt, need to be of the order [IPv4, IPv6], but PodCIDRs is setup so that PodCIDRs[0] == PodCIDR.
-		// so have to handle the case where PodCIDR can be IPv6 and set that to localDetectors[1]
-		if utilsnet.IsIPv6CIDRString(nodeInfo.Spec.PodCIDR) {
-			localDetectors[1], err = proxyutiliptables.NewDetectLocalByCIDR(nodeInfo.Spec.PodCIDR, ipt[1])
-			if err != nil {
-				return localDetectors, err
-			}
-			if len(nodeInfo.Spec.PodCIDRs) > 1 {
-				localDetectors[0], err = proxyutiliptables.NewDetectLocalByCIDR(nodeInfo.Spec.PodCIDRs[1], ipt[0])
-			}
-		} else {
-			localDetectors[0], err = proxyutiliptables.NewDetectLocalByCIDR(nodeInfo.Spec.PodCIDR, ipt[0])
-			if err != nil {
-				return localDetectors, err
-			}
-			if len(nodeInfo.Spec.PodCIDRs) > 1 {
-				localDetectors[1], err = proxyutiliptables.NewDetectLocalByCIDR(nodeInfo.Spec.PodCIDRs[1], ipt[1])
-			}
-		}
-		return localDetectors, err
-	default:
-		klog.Warningf("unknown detect-local-mode: %v", mode)
-	}
-	klog.Warning("detect-local-mode: ", string(mode), " , defaulting to no-op detect-local")
-	return localDetectors, nil
 }
 
 // cidrTuple takes a comma separated list of CIDRs and return a tuple (ipv4cidr,ipv6cidr)

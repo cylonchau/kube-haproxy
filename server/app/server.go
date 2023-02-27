@@ -51,10 +51,10 @@ import (
 	kubeproxyconfig "k8s.io/kubernetes/pkg/proxy/apis/config"
 	proxyconfigscheme "k8s.io/kubernetes/pkg/proxy/apis/config/scheme"
 	kubeproxyconfigv1alpha1 "k8s.io/kubernetes/pkg/proxy/apis/config/v1alpha1"
-	"k8s.io/kubernetes/pkg/proxy/config"
 	proxyutil "k8s.io/kubernetes/pkg/proxy/util"
 
 	kube_haproxy "github.com/cylonchau/kube-haproxy/api"
+	"github.com/cylonchau/kube-haproxy/config"
 	"github.com/cylonchau/kube-haproxy/haproxy"
 )
 
@@ -89,16 +89,17 @@ func (o *Options) addOSFlags(fs *pflag.FlagSet) {}
 // AddFlags adds flags to fs and binds them to options.
 func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	o.addOSFlags(fs)
-	fs.DurationVar(&o.syncPeriod, "sync-period", time.Duration(30), "The maximum interval of how often haproxy rules are refreshed (e.g. '5s', '1m', '2h22m').  Must be greater than 0.")
-	fs.DurationVar(&o.minSyncPeriod, "min-sync-period", time.Duration(10), "The minimum interval of how often the haproxy rules can be refreshed as endpoints and services change (e.g. '5s', '1m', '2h22m').")
+	fs.DurationVar(&o.syncPeriod, "sync-period", time.Duration(180*time.Second), "The maximum interval of how often haproxy rules are refreshed (e.g. '5s', '1m', '2h22m').  Must be greater than 0.")
+	fs.DurationVar(&o.minSyncPeriod, "min-sync-period", time.Duration(60*time.Second), "The minimum interval of how often the haproxy rules can be refreshed as endpoints and services change (e.g. '5s', '1m', '2h22m').")
 	fs.BoolVar(&o.cleanupAndExit, "cleanup", false, "If true cleanup haproxy frontends/backends/servers/binds rules and exit.")
-	fs.DurationVar(&o.configSyncPeriod.Duration, "config-sync-period", o.configSyncPeriod.Duration, "How often configuration from the apiserver is refreshed.  Must be greater than 0.")
+	fs.DurationVar(&o.configSyncPeriod.Duration, "config-sync-period", time.Duration(600*time.Second), "How often configuration from the apiserver is refreshed.  Must be greater than 0.")
 
 	fs.StringVar(&o.config.Kubeconfig, "kubeconfig", o.config.Kubeconfig, "Path to kubeconfig file with authorization information (the master location is set by the master flag).")
 	fs.StringVar(&o.config.ContentType, "kube-api-content-type", o.config.ContentType, "Content type of requests sent to apiserver.")
 	fs.Float32Var(&o.config.QPS, "kube-api-qps", o.config.QPS, "QPS to use while talking with kubernetes apiserver")
 	fs.Int32Var(&o.config.Burst, "kube-api-burst", o.config.Burst, "Burst to use while talking with kubernetes apiserver")
 
+	fs.BoolVar(&o.haproxyInfo.IsCheckServer, "check-server", false, "If true, the haproxy will enable server healthcheck.")
 	fs.StringVar(&o.haproxyInfo.Mode, "proxy-mode", "of", "Which proxy mode to use: 'onlyfetch' or 'local' (similar kube-proxy) or without proxy. If blank, default only fetch.")
 	fs.StringVar(&o.haproxyInfo.Dev, "interface", "eth0", "can specify special network interface name (only local mode).")
 	fs.StringVar(&o.haproxyInfo.User, "user", o.haproxyInfo.User, "control access to frontend/backend/listen sections or to http stats by allowing only authenticated and authorized user.")
@@ -304,6 +305,7 @@ type ProxyServer struct {
 	Recorder            record.EventRecorder
 	NodeRef             *v1.ObjectReference
 	BindAddressHardFail bool
+	UseEndpointSlices   bool
 	ConfigSyncPeriod    time.Duration
 }
 
@@ -369,9 +371,15 @@ func (s *ProxyServer) Run() error {
 	serviceConfig.RegisterEventHandler(s.Proxier)
 	go serviceConfig.Run(wait.NeverStop)
 
-	endpointsConfig := config.NewEndpointsConfig(informerFactory.Core().V1().Endpoints(), s.ConfigSyncPeriod)
-	endpointsConfig.RegisterEventHandler(s.Proxier)
-	go endpointsConfig.Run(wait.NeverStop)
+	if s.UseEndpointSlices {
+		endpointSliceConfig := config.NewEndpointSliceConfig(informerFactory.Discovery().V1beta1().EndpointSlices(), s.ConfigSyncPeriod)
+		endpointSliceConfig.RegisterEventHandler(s.Proxier)
+		go endpointSliceConfig.Run(wait.NeverStop)
+	} else {
+		endpointsConfig := config.NewEndpointsConfig(informerFactory.Core().V1().Endpoints(), s.ConfigSyncPeriod)
+		endpointsConfig.RegisterEventHandler(s.Proxier)
+		go endpointsConfig.Run(wait.NeverStop)
+	}
 
 	// This has to start after the calls to NewServiceConfig and NewEndpointsConfig because those
 	// functions must configure their shared informer event handlers first.

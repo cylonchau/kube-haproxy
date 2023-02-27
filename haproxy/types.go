@@ -23,14 +23,17 @@ type ObjSet struct {
 type ModeType string
 
 const (
-	Local     = "local"
-	OnlyFetch = "of"
-	MeshAll   = "mesh"
+	Local            = "local"
+	OnlyFetch        = "of"
+	MeshAll          = "mesh"
+	processName      = "haproxy"
+	defaultInterface = "eth0"
 )
 
 type InitInfo struct {
 	Host                    string
 	User, Passwd, Dev, Mode string
+	IsCheckServer           bool
 }
 
 type HaproxyInfo struct {
@@ -42,3 +45,9 @@ type Services struct {
 	Backend  []models.Backend
 	Frontend []models.Frontend
 }
+
+var (
+	checkTimeout   = int64(1)
+	forwordEnable  = "enabled"
+	forwordDisable = "disabled"
+)
