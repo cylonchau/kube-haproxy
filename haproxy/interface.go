@@ -25,12 +25,12 @@ type HaproxyInterface interface {
 
 	getVersion() int
 
-	GetServer(backendName, srvName string) models.Server
+	GetServer(backendName, srvName string) Server
 
-	GetServers(backendName string) models.Servers
+	GetServers(backendName string) Servers
 
-	AddFrontend(payload *models.Frontend) error
-	AddBind(payload *models.Bind, frontendName string) error
-	AddBackend(payload *models.Backend) error
-	AddServerToBackend(payload *models.Server, backendName string) error
+	AddFrontend(payload *models.Frontend) (bool, error)
+	AddBind(payload *models.Bind, frontendName string) (bool, error)
+	AddBackend(payload *models.Backend) (bool, error)
+	AddServerToBackend(payload *Server, backendName string) (bool, error)
 }

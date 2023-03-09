@@ -24,11 +24,7 @@ func main() {
 	// normalize func and add the go flag set by hand.
 	pflag.CommandLine.SetNormalizeFunc(cliflag.WordSepNormalizeFunc)
 	pflag.CommandLine.AddGoFlagSet(flagset)
-	// utilflag.InitFlags()
 
-	//defer klog.Flush()
-
-	//
 	if err := command.Execute(); err != nil {
 		os.Exit(1)
 	}

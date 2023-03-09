@@ -7,12 +7,13 @@ GOBUILD_DIR=cmd
 OUT_DIR ?= _output
 BIN_DIR := $(OUT_DIR)/bin
 
+dicCheck = $(shell if [ -d $(OUT_DIR) ]; then echo "true"; else echo "false"; fi)
 
 build:
 	hack/build.sh $(BINARY_NAME)
 
 clean:
-    ifneq ($(wildcard) $(OUT_DIR),)
+    ifneq ("$(dicCheck)" "true",)
     	$(shell rm -fr $(OUT_DIR))
     endif
 

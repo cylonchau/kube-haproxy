@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"reflect"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -82,6 +81,7 @@ type Options struct {
 	syncPeriod, minSyncPeriod time.Duration
 	configSyncPeriod          metav1.Duration
 	haproxyInfo               haproxy.InitInfo
+	algorithm                 int32
 }
 
 func (o *Options) addOSFlags(fs *pflag.FlagSet) {}
@@ -100,12 +100,12 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	fs.Int32Var(&o.config.Burst, "kube-api-burst", o.config.Burst, "Burst to use while talking with kubernetes apiserver")
 
 	fs.BoolVar(&o.haproxyInfo.IsCheckServer, "check-server", false, "If true, the haproxy will enable server healthcheck.")
-	fs.StringVar(&o.haproxyInfo.Mode, "proxy-mode", "of", "Which proxy mode to use: 'onlyfetch' or 'local' (similar kube-proxy) or without proxy. If blank, default only fetch.")
+	fs.StringVar(&o.haproxyInfo.Mode, "proxy-mode", "of", "Which proxy mode to use: 'onlyfetch' or 'local' (similar kube-proxy) or mesh. If blank, default only fetch.")
 	fs.StringVar(&o.haproxyInfo.Dev, "interface", "eth0", "can specify special network interface name (only local mode).")
 	fs.StringVar(&o.haproxyInfo.User, "user", o.haproxyInfo.User, "control access to frontend/backend/listen sections or to http stats by allowing only authenticated and authorized user.")
 	fs.StringVar(&o.haproxyInfo.Passwd, "passwd", o.haproxyInfo.Passwd, "specify current user's password. Both secure (encrypted) and insecure (unencrypted) passwords can be used.")
-	fs.StringVar(&o.haproxyInfo.Host, "dataplaneapi", "http://127.0.0.1:5555", "specify dataplaneapi address.")
-
+	fs.StringVar(&o.haproxyInfo.Host, "dataplaneapi", "http://127.0.0.1:5555", "specify dataplaneapi address, schema must specify.")
+	fs.Int32Var(&o.algorithm, "algorithm", 0, "backend server algorithm. default roundrobin.")
 }
 
 // NewOptions returns initialized Options
@@ -401,27 +401,23 @@ func (s *ProxyServer) birthCry() {
 // and exit if success return nil
 func (s *ProxyServer) CleanupAndExit(o *haproxy.InitInfo) error {
 	haproxyHandler := haproxy.NewHaproxyHandle(o)
-	infos := haproxyHandler.GetAllService()
-	if reflect.DeepEqual(infos, haproxy.Services{}) {
+	serivces := haproxyHandler.GetServices()
+	if len(serivces) == 0 {
 		return errors.New("Get all services error.")
 	}
 
 	var encounteredError bool
-	klog.V(3).Infof("Removing haproxy backend rules.")
-	for _, svc := range infos.Backend {
-		encounteredError = haproxyHandler.DeleteBackend(svc.Name)
-	}
-	klog.V(3).Infof("Removing haproxy frontend rules.")
-	for _, svc := range infos.Frontend {
-		if svc.Name == "stats" {
-			continue
+	for _, svc := range serivces {
+		klog.V(3).Info("Removing haproxy backend rules.")
+		encounteredError = haproxyHandler.DeleteBackend(svc.Backend.Name)
+		if encounteredError {
+			return errors.New("encountered an error while tearing down Backend rules")
 		}
-		encounteredError = haproxyHandler.DeleteFrontend(svc.Name)
+		klog.V(3).Info("Removing haproxy frontend rules.")
+		encounteredError = haproxyHandler.DeleteFrontend(svc.Frontend.Name)
+		if encounteredError {
+			return errors.New("encountered an error while tearing down Frontend rules")
+		}
 	}
-
-	if encounteredError {
-		return errors.New("encountered an error while tearing down rules")
-	}
-
 	return nil
 }

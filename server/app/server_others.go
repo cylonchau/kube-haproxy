@@ -85,9 +85,9 @@ func newProxyServer(opt *Options) (*ProxyServer, error) {
 	}
 
 	var proxier kube_haproxy.Provider
-
 	proxyMode := getProxyMode(opt.haproxyInfo.Mode)
-
+	algorithm := Algorithm(int(opt.algorithm))
+	opt.haproxyInfo.ServerAlgorithm = algorithm
 	switch proxyMode {
 	case proxyModeOF:
 		proxier, err = haproxy.NewProxier(

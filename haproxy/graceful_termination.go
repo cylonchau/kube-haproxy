@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/amit7itz/goset"
-	"github.com/haproxytech/models"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 )
@@ -37,7 +36,7 @@ const (
 // If nothing special happened, real server will be delete after process time.
 type srvItem struct {
 	backendName string
-	srv         *models.Server
+	srv         Server
 }
 
 type graceTerminateSrvList struct {
@@ -53,7 +52,7 @@ func (q *graceTerminateSrvList) add(server *srvItem) bool {
 		return false
 	}
 
-	klog.V(5).Infof("Adding server %v to graceful delete rsList", server.srv.Address)
+	klog.V(4).Infof("Adding server %v to graceful delete rsList", server.srv.Address)
 	q.list.Add(*server)
 	return true
 }
@@ -115,7 +114,7 @@ func NewGracefulTerminationManager(haproxyInterface HaproxyInterface) *GracefulT
 }
 
 // InTerminationList to check whether specified unique rs name is in graceful termination list
-func (m *GracefulTerminationManager) InTerminationList(srv *models.Server, backendName string) bool {
+func (m *GracefulTerminationManager) InTerminationList(srv Server, backendName string) bool {
 	return m.srvList.exist(&srvItem{
 		srv:         srv,
 		backendName: backendName,
@@ -123,7 +122,7 @@ func (m *GracefulTerminationManager) InTerminationList(srv *models.Server, backe
 }
 
 // GracefulDeleteRS to update rs weight to 0, and add rs to graceful terminate list
-func (m *GracefulTerminationManager) GracefulDeleteSrv(srv *models.Server, backendName string) error {
+func (m *GracefulTerminationManager) GracefulDeleteSrv(srv Server, backendName string) error {
 	// Try to delete rs before add it to graceful delete list
 	ele := &srvItem{
 		srv:         srv,
@@ -137,22 +136,21 @@ func (m *GracefulTerminationManager) GracefulDeleteSrv(srv *models.Server, backe
 		return nil
 	}
 
-	klog.V(5).Infof("Adding an element to graceful delete srvList: %+v", ele)
+	klog.V(4).Infof("Adding an element to graceful delete srvList: %+v", ele)
 	m.srvList.add(ele)
 	return nil
 }
 
 func (m *GracefulTerminationManager) deleteSrvFunc(srvToDelete *srvItem) (bool, error) {
-	klog.V(5).Infof("Trying to delete server in backend: %s", srvToDelete.srv.Address, srvToDelete.backendName)
-	rss := m.haproxy.GetServer(srvToDelete.srv.Name, srvToDelete.backendName)
-	if reflect.TypeOf(rss) == reflect.TypeOf(&models.Server{}) {
+	klog.V(4).Infof("Trying to delete server %s in backend %s", srvToDelete.srv.Address, srvToDelete.backendName)
+	rss := m.haproxy.GetServer(srvToDelete.backendName, srvToDelete.srv.Name)
+	if reflect.DeepEqual(rss, Server{}) {
 		return false, errors.New("server is nil")
 	}
-
-	klog.V(5).Infof("Deleting server in backend: %s", srvToDelete.srv.Address, srvToDelete.backendName)
+	klog.V(4).Infof("Deleting server %s in backend %s", srvToDelete.srv.Address, srvToDelete.backendName)
 	bool, err := m.haproxy.DeleteServerFromBackend(srvToDelete.srv.Name, srvToDelete.backendName)
 	if err != nil || !bool {
-		return false, fmt.Errorf("Delete destination %s err: %v", srvToDelete.srv.Address, err)
+		return false, fmt.Errorf("Delete destination %s failed: %v", srvToDelete.srv.Address, err)
 	}
 	return bool, nil
 }
@@ -164,7 +162,7 @@ func (m *GracefulTerminationManager) tryDeleteSrv() {
 }
 
 // MoveRSOutofGracefulDeleteList to delete an rs and remove it from the rsList immediately
-func (m *GracefulTerminationManager) MoveRSOutofGracefulDeleteList(srv *models.Server, backendName string) error {
+func (m *GracefulTerminationManager) MoveRSOutofGracefulDeleteList(srv Server, backendName string) error {
 	item := &srvItem{
 		backendName: backendName,
 		srv:         srv,

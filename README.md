@@ -46,6 +46,16 @@ make build
 - only fetch at will.
 - replacement kube-proxy need change kube-apiserver service controller.
 
+# usage
+
+- if your kubernetes cluster service frequent changes, then --min-sync-period set min number
+- support algorithm feture with haproxy, use --algorithm int attribute, the algorithm list see [haproxy doc](http://docs.haproxy.org/2.6/configuration.html#4.2-balance%20url_param)
+- support tcp/http protocol, kube-proxy onlytcp, extend.
+
+# TODO
+- more proxier
+- dataplaneapi replace with haproxy sdk, performance raise
+
 # argument
 - --interface string                 can specify special network interface name (only local mode).
 - --kube-api-burst int32             Burst to use while talking with kubernetes apiserver
